@@ -22,8 +22,11 @@ cannot serve CUDA-built and TPU-built vLLM at once). On a GPU box, install
 the pinned fork into the venv after `uv sync`:
 
 ```bash
-uv pip install 'vllm @ git+https://github.com/marin-community/vllm.git@327a10590a2e72ea6de7a00e52a085856158b828'
+uv pip install 'vllm @ git+https://github.com/RohithKuditipudi/vllm.git@e0ce7b17fcce3c6426162a9763cf12f394fe1db8'
 ```
+
+(That rev is the `held_request_ids` scheduler patch re-based onto the
+marin-community fork rev that marin currently pins.)
 
 ## CLI
 

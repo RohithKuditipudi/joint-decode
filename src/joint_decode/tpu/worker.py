@@ -99,6 +99,11 @@ def _validate_tpu_engine(engine: Any) -> None:
     scheduler_module = type(_scheduler(engine)).__module__
     if not scheduler_module.startswith("vllm.v1.core.sched"):
         raise RuntimeError(f"joint decode requires vLLM's v1 scheduler, got {scheduler_module}")
+    if (engine.vllm_config.additional_config or {}).get("enable_continue_decode"):
+        raise RuntimeError(
+            "joint decode requires enable_continue_decode to be unset: the continue-decode "
+            "loop samples multiple tokens per step on-device, bypassing the token-decision callback"
+        )
 
 
 def _eos_token_id(tokenizer: Any) -> int:
