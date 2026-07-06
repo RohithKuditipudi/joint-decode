@@ -76,6 +76,7 @@ def run_worker_loop(llm: Any, *, max_tokens: int, stop: list[str] | None, max_li
                     ),
                 )
                 live.add(rid)
+                runtime_state.live_rids.add(rid)
 
         admit(initial_admit)
 
@@ -116,6 +117,7 @@ def run_worker_loop(llm: Any, *, max_tokens: int, stop: list[str] | None, max_li
                 text_results[rid] = completion.text
                 finish_reasons[rid] = completion.finish_reason or "unknown"
                 live.remove(rid)
+                runtime_state.live_rids.discard(rid)
                 finished.append(
                     {
                         "rid": rid,

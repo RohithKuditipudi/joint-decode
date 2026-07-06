@@ -12,10 +12,14 @@ class WorkerCommands:
 @dataclass
 class JointDecodeRuntimeState:
     pending_tokens: dict[str, list[int]] = field(default_factory=dict)
+    # External rids currently admitted to the engine; the TPU decision client
+    # rejects callback rows outside this set (its request-id-stability check).
+    live_rids: set[str] = field(default_factory=set)
     latest_commands: WorkerCommands | None = None
 
     def reset(self) -> None:
         self.pending_tokens.clear()
+        self.live_rids.clear()
         self.latest_commands = None
 
     def publish_commands(self, *, admit: list[str] | None = None, abort: str | None = None) -> None:
