@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from joint_decode_gpu.worker import _commands, _max_live_requests, _read_start
+from joint_decode.worker_loop import _commands, _read_start, engine_max_live_requests
 
 
 def _fake_engine(max_num_seqs: int) -> SimpleNamespace:
@@ -20,11 +20,11 @@ def _fake_engine(max_num_seqs: int) -> SimpleNamespace:
 
 
 def test_max_live_requests_floors_kv_concurrency() -> None:
-    assert _max_live_requests(_fake_engine(max_num_seqs=64), lambda *_args: 7.9) == 7
+    assert engine_max_live_requests(_fake_engine(max_num_seqs=64), lambda *_args: 7.9) == 7
 
 
 def test_max_live_requests_caps_at_max_num_seqs() -> None:
-    assert _max_live_requests(_fake_engine(max_num_seqs=4), lambda *_args: 7.9) == 4
+    assert engine_max_live_requests(_fake_engine(max_num_seqs=4), lambda *_args: 7.9) == 4
 
 
 def test_commands_skips_blank_lines_and_parses_json() -> None:

@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 import torch.distributed as dist
 
-from joint_decode_gpu.config import VLLM_GPU_ENV_VARS
+from joint_decode.gpu.config import VLLM_GPU_ENV_VARS
 
 
 @pytest.mark.gpu
@@ -35,7 +35,7 @@ def test_forced_tokens_stay_attached_to_request_ids_under_real_vllm(monkeypatch:
     try:
         from vllm import LLM, SamplingParams
 
-        from joint_decode_gpu.logits_processor import JointDecodeLogitsProcessor
+        from joint_decode.gpu.logits_processor import JointDecodeLogitsProcessor
 
         llm = LLM(
             model=model_path,

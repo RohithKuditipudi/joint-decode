@@ -4,11 +4,11 @@ from dataclasses import dataclass
 
 import pytest
 
-from joint_decode_gpu.runtime_state import runtime_state
-from joint_decode_gpu.worker import (
+from joint_decode.decision import post_decision
+from joint_decode.runtime_state import runtime_state
+from joint_decode.worker_loop import (
     _drain_worker_commands,
     _local_decision_boundary,
-    _post_decision,
     _set_held_request_ids,
 )
 
@@ -67,7 +67,7 @@ def test_worker_post_uses_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
-    assert _post_decision("http://127.0.0.1:1/a", {"kind": "finish"}, timeout=3.5) == {"ok": True}
+    assert post_decision("http://127.0.0.1:1/a", {"kind": "finish"}, timeout=3.5) == {"ok": True}
     assert seen["timeout"] == 3.5
 
 

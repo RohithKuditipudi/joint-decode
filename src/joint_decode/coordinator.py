@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import random
 import subprocess
-import sys
 import threading
 from collections import deque
 from collections.abc import Callable
@@ -14,18 +12,29 @@ from enum import StrEnum
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from joint_decode_gpu.config import (
-    ADMISSION_RAMP_PROMPTS,
-    VLLM_GPU_ENV_VARS,
-    GenerateOutput,
-    JointDecodeConfig,
-    JointDecodeModelConfig,
-)
-from joint_decode_gpu.ipc import read_ipc
+from joint_decode.config import ADMISSION_RAMP_PROMPTS, GenerateOutput, JointDecodeSamplingConfig
+from joint_decode.ipc import read_ipc
 
 logger = logging.getLogger(__name__)
 
 SelectTokens = Callable[..., int | tuple[list[int], list[int]]]
+
+# Backend seam: called once per side with keyword arguments
+# (side, decision_env, max_num_seqs, max_num_batched_tokens) and must return
+# the worker subprocess with text-mode stdin/stdout pipes.
+SpawnWorker = Callable[..., subprocess.Popen]
+
+
+def worker_scheduler_args(sampling: JointDecodeSamplingConfig, max_model_len: int) -> tuple[int, int]:
+    max_num_seqs = sampling.max_microbatch_size
+    configured = sampling.max_num_batched_tokens
+    if configured is None:
+        return max_num_seqs, max_num_seqs + ADMISSION_RAMP_PROMPTS * max_model_len
+    if configured < max_model_len:
+        raise ValueError(f"max_num_batched_tokens={configured} is smaller than max_model_len={max_model_len}")
+    if configured < max_num_seqs:
+        raise ValueError(f"max_num_batched_tokens={configured} is smaller than max_num_seqs={max_num_seqs}")
+    return max_num_seqs, configured
 
 
 class Side(StrEnum):
@@ -464,10 +473,23 @@ def _validated_side_plan(
 
 
 class JointDecoder:
-    def __init__(self, config: JointDecodeConfig, *, select_token: SelectTokens) -> None:
-        self.config = config
+    """Two-engine joint decoder; backend-agnostic process supervision."""
+
+    def __init__(
+        self,
+        sampling: JointDecodeSamplingConfig,
+        *,
+        max_model_len_a: int,
+        max_model_len_b: int,
+        select_token: SelectTokens,
+        spawn_worker: SpawnWorker,
+    ) -> None:
+        self.sampling = sampling
+        self._max_model_len_a = max_model_len_a
+        self._max_model_len_b = max_model_len_b
         self._select_token = select_token
-        self._rng = random.Random(config.sampling.seed)
+        self._spawn_worker = spawn_worker
+        self._rng = random.Random(sampling.seed)
         self._coordinator: Coordinator | None = None
         self._http_server: ThreadingHTTPServer | None = None
         self._http_thread: threading.Thread | None = None
@@ -480,7 +502,7 @@ class JointDecoder:
 
     def __enter__(self) -> JointDecoder:
         self._coordinator = Coordinator(
-            self.config.sampling.barrier_timeout_s,
+            self.sampling.barrier_timeout_s,
             self._select_token,
             self._rng,
         )
@@ -490,23 +512,17 @@ class JointDecoder:
         self._http_thread = threading.Thread(target=self._http_server.serve_forever, daemon=True)
         self._http_thread.start()
         try:
-            max_num_seqs_a, self._budget_a = self._worker_scheduler_args(self.config.model_a)
-            max_num_seqs_b, self._budget_b = self._worker_scheduler_args(self.config.model_b)
+            max_num_seqs_a, self._budget_a = worker_scheduler_args(self.sampling, self._max_model_len_a)
+            max_num_seqs_b, self._budget_b = worker_scheduler_args(self.sampling, self._max_model_len_b)
             self._proc_a = self._spawn_worker(
                 side="a",
-                model_config=self.config.model_a,
-                top_k=self.config.sampling.top_k_a,
-                max_tokens=self.config.sampling.max_tokens_a,
-                decision_url=f"http://127.0.0.1:{actual_port}/a",
+                decision_env=self._decision_env("a", self.sampling.top_k_a, actual_port),
                 max_num_seqs=max_num_seqs_a,
                 max_num_batched_tokens=self._budget_a,
             )
             self._proc_b = self._spawn_worker(
                 side="b",
-                model_config=self.config.model_b,
-                top_k=self.config.sampling.top_k_b,
-                max_tokens=self.config.sampling.max_tokens_b,
-                decision_url=f"http://127.0.0.1:{actual_port}/b",
+                decision_env=self._decision_env("b", self.sampling.top_k_b, actual_port),
                 max_num_seqs=max_num_seqs_b,
                 max_num_batched_tokens=self._budget_b,
             )
@@ -519,79 +535,16 @@ class JointDecoder:
             raise
         return self
 
-    def _spawn_worker(
-        self,
-        *,
-        side: str,
-        model_config: JointDecodeModelConfig,
-        top_k: int,
-        max_tokens: int,
-        decision_url: str,
-        max_num_seqs: int,
-        max_num_batched_tokens: int,
-    ) -> subprocess.Popen:
-        env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = str(model_config.gpu_index)
-        env["RERANK_TOKEN_DECISION_URL"] = decision_url
-        env["RERANK_TOKEN_DECISION_SIDE"] = side
-        env["RERANK_TOKEN_DECISION_TOP_K"] = str(top_k)
-        env["RERANK_TOKEN_DECISION_TIMEOUT"] = str(self.config.sampling.barrier_timeout_s + 10.0)
-        for key, value in VLLM_GPU_ENV_VARS.items():
-            env[key] = value
-
-        cmd = [
-            sys.executable,
-            "-u",
-            "-m",
-            "joint_decode_gpu.worker",
-            "--model-path",
-            model_config.model_path,
-            "--max-tokens",
-            str(max_tokens),
-            "--max-model-len",
-            str(model_config.max_model_len),
-            "--max-num-seqs",
-            str(max_num_seqs),
-            "--max-num-batched-tokens",
-            str(max_num_batched_tokens),
-            "--seed",
-            str(self.config.sampling.seed),
-        ]
-        if model_config.gpu_memory_utilization is not None:
-            cmd += ["--gpu-memory-utilization", str(model_config.gpu_memory_utilization)]
-        if model_config.enable_prefix_caching:
-            cmd.append("--enable-prefix-caching")
-        if model_config.enforce_eager:
-            cmd.append("--enforce-eager")
-        if self.config.sampling.stop:
-            cmd += ["--stop", json.dumps(list(self.config.sampling.stop))]
-
-        logger.info("spawning joint-decode worker %s on CUDA_VISIBLE_DEVICES=%s", side, model_config.gpu_index)
-        return subprocess.Popen(
-            cmd,
-            env=env,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
-
-    def _worker_scheduler_args(self, model_config: JointDecodeModelConfig) -> tuple[int, int]:
-        max_num_seqs = self.config.sampling.max_microbatch_size
-        configured = self.config.sampling.max_num_batched_tokens
-        if configured is None:
-            return max_num_seqs, max_num_seqs + ADMISSION_RAMP_PROMPTS * model_config.max_model_len
-        if configured < model_config.max_model_len:
-            raise ValueError(
-                f"max_num_batched_tokens={configured} is smaller than "
-                f"max_model_len={model_config.max_model_len}"
-            )
-        if configured < max_num_seqs:
-            raise ValueError(
-                f"max_num_batched_tokens={configured} is smaller than "
-                f"max_num_seqs={max_num_seqs}"
-            )
-        return max_num_seqs, configured
+    def _decision_env(self, side: str, top_k: int, port: int) -> dict[str, str]:
+        return {
+            "RERANK_TOKEN_DECISION_URL": f"http://127.0.0.1:{port}/{side}",
+            "RERANK_TOKEN_DECISION_SIDE": side,
+            "RERANK_TOKEN_DECISION_TOP_K": str(top_k),
+            # Worker's own HTTP timeout must be > server-side barrier timeout,
+            # so the server gets a chance to time out and report rather than
+            # the client tearing the connection down first.
+            "RERANK_TOKEN_DECISION_TIMEOUT": str(self.sampling.barrier_timeout_s + 10.0),
+        }
 
     def generate(self, prompts_a: list[str], prompts_b: list[str]) -> list[GenerateOutput]:
         if len(prompts_a) != len(prompts_b):
@@ -615,20 +568,20 @@ class JointDecoder:
         plan_a = _validated_side_plan(
             read_ipc(self._proc_a, expect_kind="plan"),
             request_ids=request_ids,
-            max_model_len=self.config.model_a.max_model_len,
+            max_model_len=self._max_model_len_a,
             budget=self._budget_a,
             side="a",
         )
         plan_b = _validated_side_plan(
             read_ipc(self._proc_b, expect_kind="plan"),
             request_ids=request_ids,
-            max_model_len=self.config.model_b.max_model_len,
+            max_model_len=self._max_model_len_b,
             budget=self._budget_b,
             side="b",
         )
         window = min(
             len(prompts_a),
-            self.config.sampling.max_microbatch_size,
+            self.sampling.max_microbatch_size,
             self._max_live_requests_a,
             self._max_live_requests_b,
         )
@@ -700,14 +653,3 @@ class JointDecoder:
         if self._http_thread is not None:
             self._http_thread.join(timeout=5)
             self._http_thread = None
-
-
-def run_joint_decode(
-    config: JointDecodeConfig,
-    prompts_a: list[str],
-    prompts_b: list[str],
-    *,
-    select_token: SelectTokens,
-) -> list[GenerateOutput]:
-    with JointDecoder(config, select_token=select_token) as decoder:
-        return decoder.generate(prompts_a, prompts_b)

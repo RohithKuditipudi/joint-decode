@@ -50,3 +50,23 @@ def select_product_of_experts(
         temperature=temperature,
         rng=rng,
     )
+
+
+def select_top_rank(
+    a_topk: list[dict[str, Any]],
+    b_topk: list[dict[str, Any]],
+    *,
+    rng: random.Random,
+) -> int:
+    """Pick the token from A's top-k with the highest rank in B's top-k;
+    fall back to A's top-1 when the lists do not overlap. Deterministic;
+    ported from the generation-0 TPU joint-decode selector."""
+    del rng
+    a_ids = [int(t["token_id"]) for t in a_topk]
+    if not a_ids:
+        raise ValueError("empty top-k from side A; ensure top_k_a >= 1")
+    b_rank = {int(t["token_id"]): index for index, t in enumerate(b_topk)}
+    overlap = [(b_rank[token_id], token_id) for token_id in a_ids if token_id in b_rank]
+    if not overlap:
+        return a_ids[0]
+    return min(overlap)[1]

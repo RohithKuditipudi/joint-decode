@@ -1,12 +1,29 @@
-# joint-decode-gpu
+# joint-decode
 
-Standalone GPU joint decoding for two vLLM models, including models with
-different tokenizers.
+Joint decoding for two vLLM models, including models with different
+tokenizers, with GPU and TPU backends.
 
 At each decode step, worker A and worker B each send top-k logits for the same
 active request ids to a parent HTTP coordinator. The coordinator chooses one
 side-local token list per request. Each worker then masks its logits so vLLM emits
 the chosen local token. Output text is taken from worker A.
+
+The protocol (coordinator, worker run loop, per-step decision client) is
+backend-neutral and lives in `joint_decode`; `joint_decode.gpu` and
+`joint_decode.tpu` provide engine construction and the interception point
+(a vLLM custom logits processor on GPU; the tpu-inference token-decision
+callback on TPU). Engines are peer dependencies provided by the environment.
+
+Imported from joint-decode-gpu at commit 3dbbe21, which stays in service
+until its consumers cut over.
+
+The package deliberately declares no engine dependency (a universal lockfile
+cannot serve CUDA-built and TPU-built vLLM at once). On a GPU box, install
+the pinned fork into the venv after `uv sync`:
+
+```bash
+uv pip install 'vllm @ git+https://github.com/marin-community/vllm.git@327a10590a2e72ea6de7a00e52a085856158b828'
+```
 
 ## CLI
 

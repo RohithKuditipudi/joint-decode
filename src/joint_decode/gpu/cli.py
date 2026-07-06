@@ -7,14 +7,10 @@ import logging
 
 import fsspec
 
-from joint_decode_gpu.aggregation import select_avg_logits
-from joint_decode_gpu.config import (
-    DEFAULT_MAX_MICROBATCH_SIZE,
-    JointDecodeConfig,
-    JointDecodeModelConfig,
-    JointDecodeSamplingConfig,
-)
-from joint_decode_gpu.coordinator import run_joint_decode
+from joint_decode.config import DEFAULT_MAX_MICROBATCH_SIZE, JointDecodeSamplingConfig
+from joint_decode.gpu.config import JointDecodeConfig, JointDecodeModelConfig
+from joint_decode.gpu.decoder import run_joint_decode
+from joint_decode.selection import select_avg_logits
 
 logger = logging.getLogger(__name__)
 

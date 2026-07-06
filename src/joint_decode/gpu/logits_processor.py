@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import json
 import os
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
@@ -15,7 +12,7 @@ from vllm.v1.sample.logits_processor.interface import (
     MoveDirectionality,
 )
 
-from joint_decode_gpu.runtime_state import runtime_state
+from joint_decode.decision import resolve_undecided, split_pending
 
 
 @dataclass
@@ -88,30 +85,25 @@ class JointDecodeLogitsProcessor(LogitsProcessor):
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         if logits.ndim != 2:
             raise ValueError(f"expected 2D logits tensor, got shape={tuple(logits.shape)}")
-        forced_by_rid: dict[str, int] = {}
-        decode_rows: list[tuple[int, RequestState]] = []
-        topk_payload: dict[str, list[dict[str, int | float]]] = {}
-        k = min(self.top_k, logits.shape[-1])
-
+        rids_by_row: list[str] = []
         for row in range(logits.shape[0]):
             state = self._rows.get(row)
             if state is None:
                 raise RuntimeError(f"missing request state for logits row {row}")
-            pending = runtime_state.pending_tokens.get(state.rid)
-            if pending:
-                forced_by_rid[state.rid] = pending.pop(0)
-                if not pending:
-                    runtime_state.pending_tokens.pop(state.rid, None)
-            else:
-                decode_rows.append((row, state))
+            rids_by_row.append(state.rid)
 
-        if decode_rows:
+        forced_by_rid, undecided = split_pending(rids_by_row)
+        if undecided:
+            k = min(self.top_k, logits.shape[-1])
             top_values, top_indices = torch.topk(logits, k=k, dim=-1)
             top_values_cpu = top_values.detach().cpu()
             top_indices_cpu = top_indices.detach().cpu()
-            request_ids = [state.rid for _, state in decode_rows]
-            for row, state in decode_rows:
-                topk_payload[state.rid] = [
+            undecided_set = set(undecided)
+            topk_by_rid: dict[str, list[dict[str, int | float]]] = {}
+            for row, rid in enumerate(rids_by_row):
+                if rid not in undecided_set:
+                    continue
+                topk_by_rid[rid] = [
                     {
                         "token_id": int(token_id),
                         "logit": float(logit),
@@ -122,73 +114,24 @@ class JointDecodeLogitsProcessor(LogitsProcessor):
                         strict=True,
                     )
                 ]
-
-            response = self._post_decision(
-                {
-                    "kind": "decode",
-                    "side": self.side,
-                    "request_ids": request_ids,
-                    "topk": topk_payload,
-                }
+            forced_by_rid.update(
+                resolve_undecided(
+                    topk_by_rid,
+                    decision_url=self.decision_url,
+                    side=self.side,
+                    timeout=self.timeout,
+                    eos_token_id=self.eos_token_id,
+                )
             )
-            self._apply_response(response, forced_by_rid, {state.rid for _, state in decode_rows})
 
         forced = torch.tensor(
-            [forced_by_rid[self._rows[row].rid] for row in range(logits.shape[0])],
+            [forced_by_rid[rid] for rid in rids_by_row],
             dtype=torch.long,
             device=logits.device,
         ).unsqueeze(-1)
         out = torch.full_like(logits, -float("inf"))
         out.scatter_(-1, forced, 0.0)
         return out
-
-    def _apply_response(
-        self,
-        response: dict[str, Any],
-        forced_by_rid: dict[str, int],
-        decoded_rids: set[str],
-    ) -> None:
-        abort = response.get("abort")
-        if abort:
-            runtime_state.publish_commands(abort=str(abort))
-            raise RuntimeError(str(abort))
-        runtime_state.publish_commands(admit=response.get("admit") or [])
-
-        for rid, token_list in (response.get("tokens") or {}).items():
-            if isinstance(token_list, int):
-                tokens = [token_list]
-            else:
-                tokens = list(token_list)
-            if not tokens:
-                raise RuntimeError(f"coordinator returned an empty token list for rid={rid}")
-            forced_by_rid[rid] = int(tokens.pop(0))
-            if tokens:
-                runtime_state.pending_tokens[rid] = [int(token) for token in tokens]
-            else:
-                runtime_state.pending_tokens.pop(rid, None)
-
-        for rid in response.get("force_stop") or []:
-            if rid in decoded_rids:
-                forced_by_rid[rid] = self.eos_token_id
-                runtime_state.pending_tokens.pop(rid, None)
-
-        missing = decoded_rids - set(forced_by_rid)
-        if missing:
-            raise RuntimeError(f"coordinator did not return tokens or force_stop for rids={sorted(missing)}")
-
-    def _post_decision(self, payload: dict[str, Any]) -> dict[str, Any]:
-        body = json.dumps(payload).encode()
-        request = urllib.request.Request(
-            self.decision_url,
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                return json.loads(response.read())
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"joint-decode decision request failed: {exc}") from exc
 
 
 def _required_env(name: str) -> str:

@@ -1,91 +1,37 @@
+"""Coordinator-driven worker run loop, shared by all backends.
+
+The backend worker entry point constructs and validates the engine, then hands
+it to run_worker_loop. The spawning JointDecoder provides the
+RERANK_TOKEN_DECISION_* env vars.
+"""
+
 from __future__ import annotations
 
-import argparse
 import json
 import logging
 import os
 import sys
-import urllib.error
-import urllib.request
 from collections.abc import Iterable, Iterator
 from typing import Any
 
-import torch.distributed as dist
-
-from joint_decode_gpu.config import VLLM_GPU_ENV_VARS
-from joint_decode_gpu.ipc import emit_ipc
-from joint_decode_gpu.runtime_state import WorkerCommands, runtime_state
+from joint_decode.decision import post_decision
+from joint_decode.ipc import emit_ipc
+from joint_decode.runtime_state import WorkerCommands, runtime_state
 
 logger = logging.getLogger(__name__)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model-path", required=True)
-    parser.add_argument("--max-tokens", type=int, required=True)
-    parser.add_argument("--max-model-len", type=int, required=True)
-    parser.add_argument("--max-num-seqs", type=int, required=True)
-    parser.add_argument("--max-num-batched-tokens", type=int, required=True)
-    parser.add_argument("--seed", type=int, required=True)
-    parser.add_argument("--gpu-memory-utilization", type=float, default=None)
-    parser.add_argument("--enable-prefix-caching", action="store_true")
-    parser.add_argument("--enforce-eager", action="store_true")
-    parser.add_argument("--stop", default=None)
-    args = parser.parse_args()
-
-    try:
-        run_worker(args)
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
-
-
-def run_worker(args: argparse.Namespace) -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        stream=sys.stderr,
-        format="%(asctime)s %(levelname)s [worker pid=%(process)d] %(message)s",
-    )
-    for key, value in VLLM_GPU_ENV_VARS.items():
-        os.environ[key] = value
-
-    from vllm import LLM, SamplingParams, TokensPrompt
-    from vllm.v1.core.kv_cache_utils import get_max_concurrency_for_kv_cache_config
-
-    from joint_decode_gpu.logits_processor import JointDecodeLogitsProcessor
+def run_worker_loop(llm: Any, *, max_tokens: int, stop: list[str] | None, max_live_requests: int) -> None:
+    from vllm import SamplingParams, TokensPrompt
 
     side = os.environ["RERANK_TOKEN_DECISION_SIDE"]
     decision_url = os.environ["RERANK_TOKEN_DECISION_URL"]
-    kwargs: dict[str, Any] = {
-        "model": args.model_path,
-        "trust_remote_code": True,
-        "seed": args.seed,
-        "tensor_parallel_size": 1,
-        "max_model_len": args.max_model_len,
-        "max_num_seqs": args.max_num_seqs,
-        "max_num_batched_tokens": args.max_num_batched_tokens,
-        "enable_chunked_prefill": False,
-        "enable_prefix_caching": args.enable_prefix_caching,
-        "enforce_eager": args.enforce_eager,
-        "async_scheduling": False,
-        "logits_processors": [JointDecodeLogitsProcessor],
-    }
-    if args.gpu_memory_utilization is not None:
-        kwargs["gpu_memory_utilization"] = args.gpu_memory_utilization
-
-    llm = LLM(**kwargs)
+    timeout = float(os.environ["RERANK_TOKEN_DECISION_TIMEOUT"])
     tokenizer = llm.get_tokenizer()
     eos_id = tokenizer.eos_token_id
-    stop = list(json.loads(args.stop)) if args.stop is not None else None
-
     engine = llm.llm_engine
-    _validate_engine(engine, args.max_num_seqs, args.max_num_batched_tokens)
-    emit_ipc(
-        {
-            "kind": "handshake",
-            "max_live_requests": _max_live_requests(engine, get_max_concurrency_for_kv_cache_config),
-        }
-    )
+
+    emit_ipc({"kind": "handshake", "max_live_requests": max_live_requests})
     commands = _commands(sys.stdin)
     for message in commands:
         command = message.get("command")
@@ -113,7 +59,6 @@ def run_worker(args: argparse.Namespace) -> None:
         pending_admits: list[str] = []
         text_results: dict[str, str] = {}
         finish_reasons: dict[str, str] = {}
-        timeout = float(os.environ["RERANK_TOKEN_DECISION_TIMEOUT"])
 
         def admit(rids: list[str]) -> None:
             for rid in rids:
@@ -123,7 +68,7 @@ def run_worker(args: argparse.Namespace) -> None:
                     request_id=rid,
                     prompt=TokensPrompt(prompt_token_ids=token_ids_by_rid[rid]),
                     params=SamplingParams(
-                        max_tokens=args.max_tokens,
+                        max_tokens=max_tokens,
                         ignore_eos=False,
                         stop=stop,
                         stop_token_ids=[eos_id] if eos_id is not None else None,
@@ -143,7 +88,7 @@ def run_worker(args: argparse.Namespace) -> None:
                 admit(admits)
 
             if not live:
-                response = _post_decision(
+                response = post_decision(
                     decision_url,
                     {
                         "kind": "control",
@@ -179,7 +124,7 @@ def run_worker(args: argparse.Namespace) -> None:
                     }
                 )
             if finished:
-                _post_decision(
+                post_decision(
                     decision_url,
                     {
                         "kind": "finish",
@@ -257,7 +202,7 @@ def _scheduler(engine: Any) -> Any:
     return scheduler
 
 
-def _max_live_requests(engine: Any, concurrency_fn: Any) -> int:
+def engine_max_live_requests(engine: Any, concurrency_fn: Any) -> int:
     """Largest live window that can never exhaust KV cache, per vLLM's own
     max-model-len concurrency accounting. Staying under it means vLLM never
     preempts, which is what keeps the two engines' decode sets identical."""
@@ -266,7 +211,7 @@ def _max_live_requests(engine: Any, concurrency_fn: Any) -> int:
     return min(int(max_concurrency), scheduler.scheduler_config.max_num_seqs)
 
 
-def _validate_engine(engine: Any, max_num_seqs: int, max_num_batched_tokens: int) -> None:
+def validate_engine(engine: Any, max_num_seqs: int, max_num_batched_tokens: int) -> None:
     scheduler = _scheduler(engine)
     if not hasattr(scheduler, "held_request_ids"):
         raise RuntimeError("vLLM scheduler does not expose held_request_ids")
@@ -286,22 +231,3 @@ def _validate_engine(engine: Any, max_num_seqs: int, max_num_batched_tokens: int
         raise RuntimeError(
             f"vLLM max_num_scheduled_tokens={scheduled_tokens} is below max_num_batched_tokens={max_num_batched_tokens}"
         )
-
-
-def _post_decision(url: str, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
-    body = json.dumps(payload).encode()
-    request = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read())
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"joint-decode worker request failed: {exc}") from exc
-
-
-if __name__ == "__main__":
-    main()

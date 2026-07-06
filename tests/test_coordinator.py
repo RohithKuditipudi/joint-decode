@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from joint_decode_gpu.coordinator import Coordinator, Side, SidePlan, _validated_side_plan
+from joint_decode.coordinator import Coordinator, Side, SidePlan, _validated_side_plan
 
 
 def test_decode_pair_returns_side_local_token_lists() -> None:

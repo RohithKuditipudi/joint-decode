@@ -6,8 +6,10 @@ from typing import Any
 import pytest
 import torch.distributed as dist
 
-from joint_decode_gpu.config import JointDecodeConfig, JointDecodeModelConfig, JointDecodeSamplingConfig
-from joint_decode_gpu.coordinator import Coordinator, JointDecoder, run_joint_decode
+from joint_decode.config import JointDecodeSamplingConfig
+from joint_decode.coordinator import Coordinator
+from joint_decode.gpu.config import JointDecodeConfig, JointDecodeModelConfig
+from joint_decode.gpu.decoder import joint_decoder, run_joint_decode
 
 
 @dataclass(frozen=True)
@@ -274,7 +276,7 @@ def test_large_window_initialization_smoke() -> None:
         ),
     )
     try:
-        with JointDecoder(config, select_token=lambda *_args, **_kwargs: 0) as decoder:
+        with joint_decoder(config, select_token=lambda *_args, **_kwargs: 0) as decoder:
             assert decoder._max_live_requests_a >= 1
             assert decoder._max_live_requests_b >= 1
     finally:
