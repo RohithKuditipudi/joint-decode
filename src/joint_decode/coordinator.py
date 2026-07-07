@@ -489,7 +489,10 @@ class JointDecoder:
         self._max_model_len_b = max_model_len_b
         self._select_token = select_token
         self._spawn_worker = spawn_worker
-        self._rng = random.Random(sampling.seed)
+        # Deliberately unseeded: a seeded stream would replay against
+        # different prompts after a chunk resume, correlating samples across
+        # attempts. sampling.seed still seeds the vLLM engines.
+        self._rng = random.Random()
         self._coordinator: Coordinator | None = None
         self._http_server: ThreadingHTTPServer | None = None
         self._http_thread: threading.Thread | None = None
