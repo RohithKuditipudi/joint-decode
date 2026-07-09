@@ -17,6 +17,9 @@ from joint_decode.ipc import read_ipc
 
 logger = logging.getLogger(__name__)
 
+# Called as select_tokens(a_topk, b_topk, *, rng, request_index) where
+# request_index is the request's position in the generate() batch; outputs
+# are returned in the same order, so index i's decisions belong to output i.
 SelectTokens = Callable[..., int | tuple[list[int], list[int]]]
 
 # Backend seam: called once per side with keyword arguments
@@ -325,6 +328,7 @@ class Coordinator:
             entry_a.topk.get(rid, []),
             entry_b.topk.get(rid, []),
             rng=self._rng,
+            request_index=self._requests[rid].index,
         )
         if isinstance(selected, int):
             tokens_a = [selected]

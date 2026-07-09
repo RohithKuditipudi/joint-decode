@@ -47,6 +47,25 @@ def test_finish_wakes_peer_decode_with_force_stop() -> None:
     assert future.result()["force_stop"] == ["r0"]
 
 
+def test_decode_rounds_pass_each_requests_batch_index_to_selector() -> None:
+    seen: list[int] = []
+
+    def selector(a_topk, b_topk, *, rng, request_index):
+        del a_topk, b_topk, rng
+        seen.append(request_index)
+        return ([11], [22])
+
+    coordinator = _coordinator(selector)
+    coordinator.begin_run(["r0", "r1"], 2, *_plans(["r0", "r1"]))
+
+    for _ in range(2):  # indices stay stable across decision rounds
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            pool.submit(coordinator.handle, "a", _decode("a", ["r0", "r1"]))
+            pool.submit(coordinator.handle, "b", _decode("b", ["r0", "r1"]))
+
+    assert seen == [0, 1, 0, 1]
+
+
 def test_begin_run_resets_run_state() -> None:
     coordinator = _coordinator(lambda *_args, **_kwargs: ([11], [22]))
     assert coordinator.begin_run(["r0", "r1"], 2, *_plans(["r0", "r1"])) == ["r0", "r1"]

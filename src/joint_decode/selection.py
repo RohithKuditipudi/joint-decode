@@ -12,7 +12,9 @@ def select_avg_logits(
     advisor_weight: float,
     temperature: float,
     rng: random.Random,
+    request_index: int,
 ) -> tuple[list[int], list[int]]:
+    del request_index
     if not 0.0 <= advisor_weight <= 1.0:
         raise ValueError("advisor_weight must be in [0, 1]")
     if temperature < 0.0:
@@ -42,6 +44,7 @@ def select_product_of_experts(
     *,
     temperature: float,
     rng: random.Random,
+    request_index: int,
 ) -> tuple[list[int], list[int]]:
     return select_avg_logits(
         a_topk,
@@ -49,6 +52,7 @@ def select_product_of_experts(
         advisor_weight=0.5,
         temperature=temperature,
         rng=rng,
+        request_index=request_index,
     )
 
 
@@ -57,11 +61,12 @@ def select_top_rank(
     b_topk: list[dict[str, Any]],
     *,
     rng: random.Random,
+    request_index: int,
 ) -> int:
     """Pick the token from A's top-k with the highest rank in B's top-k;
     fall back to A's top-1 when the lists do not overlap. Deterministic;
     ported from the generation-0 TPU joint-decode selector."""
-    del rng
+    del rng, request_index
     a_ids = [int(t["token_id"]) for t in a_topk]
     if not a_ids:
         raise ValueError("empty top-k from side A; ensure top_k_a >= 1")
