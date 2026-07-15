@@ -18,6 +18,8 @@ from joint_decode.worker_loop import (
 
 logger = logging.getLogger(__name__)
 
+_V5_RPA_VMEM_LIMIT_BYTES = 64_000_000
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -124,11 +126,31 @@ def _patch_rpa_kernel_block_sizes() -> None:
         sizes = dict(original(*args, **kwargs))
         case = kwargs.get("case")
         if case is not rpa_kernel.RpaCase.DECODE:
+            q_dtype = args[0]
+            kv_dtype = args[1]
+            actual_num_q_heads = args[2]
+            actual_num_kv_heads = args[3]
+            head_dim = args[4]
             page_size = args[5]
             sizes["bq_sz"] = max(1, sizes["bq_sz"] // 2)
             sizes["bq_csz"] = max(1, sizes["bq_csz"] // 2)
             sizes["bkv_sz"] = max(page_size, sizes["bkv_sz"] // 2)
             sizes["bkv_csz"] = max(page_size, sizes["bkv_csz"] // 2)
+            if rpa_kernel.get_tpu_version() == 5:
+                estimated_vmem_bytes = rpa_kernel.get_vmem_estimate_bytes(
+                    actual_num_kv_heads=actual_num_kv_heads,
+                    actual_num_q_heads_per_kv_head=actual_num_q_heads // actual_num_kv_heads,
+                    actual_head_dim=head_dim,
+                    bq_sz=sizes["bq_sz"],
+                    bkv_sz=sizes["bkv_sz"],
+                    q_dtype=q_dtype,
+                    kv_dtype=kv_dtype,
+                )
+                if estimated_vmem_bytes > _V5_RPA_VMEM_LIMIT_BYTES:
+                    sizes["bq_sz"] = max(1, sizes["bq_sz"] // 2)
+                    sizes["bkv_sz"] = max(page_size, sizes["bkv_sz"] // 2)
+                    sizes["bq_csz"] = min(sizes["bq_csz"], sizes["bq_sz"])
+                    sizes["bkv_csz"] = min(sizes["bkv_csz"], sizes["bkv_sz"])
         return sizes
 
     patched_get_default_block_sizes._joint_decode_patched = True  # type: ignore[attr-defined]
