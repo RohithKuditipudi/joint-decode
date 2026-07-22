@@ -45,12 +45,13 @@ def _spawn_worker(
 ) -> subprocess.Popen:
     model_config = config.model_a if side == "a" else config.model_b
     max_tokens = config.sampling.max_tokens_a if side == "a" else config.sampling.max_tokens_b
+    placement = model_config.placement
 
     env = os.environ.copy()
-    env["TPU_VISIBLE_CHIPS"] = str(model_config.chip_index)
+    env["TPU_VISIBLE_CHIPS"] = ",".join(str(chip) for chip in placement.visible_chips)
     env["TPU_PROCESS_BOUNDS"] = "1,1,1"
-    env["TPU_CHIPS_PER_PROCESS_BOUNDS"] = "1,1,1"
-    env["VLLM_ASSETS_CACHE"] = os.path.join(config.cache_dir, f"assets_chip_{model_config.chip_index}")
+    env["TPU_CHIPS_PER_PROCESS_BOUNDS"] = ",".join(str(size) for size in placement.chips_per_process_bounds)
+    env["VLLM_ASSETS_CACHE"] = os.path.join(config.cache_dir, f"assets_{side}")
     # One compilation cache shared by the pair; caches key on HLO, so
     # same-architecture pairs dedupe compiles across A and B.
     env["JAX_COMPILATION_CACHE_DIR"] = os.path.join(config.cache_dir, "jax_cache")
@@ -76,6 +77,8 @@ def _spawn_worker(
         str(max_num_seqs),
         "--max-num-batched-tokens",
         str(max_num_batched_tokens),
+        "--tensor-parallel-size",
+        str(placement.tensor_parallel_size),
         "--seed",
         str(config.sampling.seed),
     ]
@@ -88,7 +91,7 @@ def _spawn_worker(
     if config.sampling.stop:
         cmd += ["--stop", json.dumps(list(config.sampling.stop))]
 
-    logger.info("spawning joint-decode worker %s on TPU_VISIBLE_CHIPS=%s", side, model_config.chip_index)
+    logger.info("spawning joint-decode worker %s on TPU_VISIBLE_CHIPS=%s", side, env["TPU_VISIBLE_CHIPS"])
     return subprocess.Popen(
         cmd,
         env=env,

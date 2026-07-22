@@ -28,6 +28,7 @@ def main() -> None:
     parser.add_argument("--max-model-len", type=int, required=True)
     parser.add_argument("--max-num-seqs", type=int, required=True)
     parser.add_argument("--max-num-batched-tokens", type=int, required=True)
+    parser.add_argument("--tensor-parallel-size", type=int, required=True)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--gpu-memory-utilization", type=float, default=None)
     parser.add_argument("--enable-prefix-caching", action="store_true")
@@ -59,7 +60,7 @@ def run_worker(args: argparse.Namespace) -> None:
         "trust_remote_code": True,
         "load_format": "runai_streamer",
         "seed": args.seed,
-        "tensor_parallel_size": 1,
+        "tensor_parallel_size": args.tensor_parallel_size,
         "data_parallel_size": 1,
         "max_model_len": args.max_model_len,
         "max_num_seqs": args.max_num_seqs,
