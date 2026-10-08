@@ -18,7 +18,8 @@ from joint_decode.worker_loop import (
 
 logger = logging.getLogger(__name__)
 
-_V5_RPA_VMEM_LIMIT_BYTES = 64_000_000
+# Reserve room for compiler-generated VMEM allocations beyond the estimate.
+_V5_RPA_VMEM_LIMIT_BYTES = 60_000_000
 
 
 def main() -> None:
